@@ -41,6 +41,8 @@ class climateScenario:
             return self._load_pulseCO2()
         elif name == 'abrupt-4xco2':
             return self._load_abrupt4xCO2()
+        elif name.startswith("cmip7_"):
+            return self._load_cmip7scenario()
         else:
             raise ValueError(f"Unknown preset '{name}'")
     
@@ -94,7 +96,30 @@ class climateScenario:
         # Set emission flag to be false for SSP scenarios
         self.flagEmissions = False
         return( merged.loc[ syear:eyear ]['Catm'] )
-        
+    
+    def _load_cmip7scenario( self ):
+        """Load CMIP7 Emissions data from the big CSV file."""
+        filename = self.datadir + '/cmip7_extensions_1750-2500.csv'
+        # Read in the data and subset for the correct scenario and CO2 only
+        df             = pd.read_csv( filename, index_col = 0 )
+        dfCO2          = df[ ( ( df['variable'] == 'CO2 AFOLU' ) | ( df['variable'] == 'CO2 FFI' ) ) ]
+        scen_name_file = self.name.replace( 'cmip7_', '', 1 )
+        if scen_name_file not in dfCO2.index:
+            raise ValueError(f"Unknown CMIP7 scenario '{self.name}'. Valid options are: {', '.join( dfCO2.index.unique() ) }" )
+        else:
+            dfscen         = dfCO2[ dfCO2.index == scen_name_file ]
+        # Convert to a DataFrame with 'year' as index
+        numeric_data   = dfscen.drop( columns=['region', 'variable', 'ar6_gwp_mass_adjusted', 'unit'] )
+        sum_by_year    = numeric_data.sum( axis=0 )
+        df_sum           = sum_by_year.reset_index()
+        df_sum.columns   = ['year', 'total_GtCO2']
+        df_sum[ 'year' ] = ( df_sum[ 'year' ].astype( float ) - 0.5).astype( int )
+        df_sum['ppmCO2'] = df_sum['total_GtCO2'] / 2.12 * 12/44  # Convert GtCO2 to ppm for the carbon cycle model
+        df_sum.set_index( 'year', inplace=True )
+        # These are emission driven scenarios, so we set the flag accordingly
+        self.flagEmissions = True
+        return df_sum
+
         
     def integrate( self, dt = 0.1 ):
         """
@@ -270,6 +295,7 @@ class climateScenario:
             ax2 = ax1.twinx()
 
             ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel("CO₂ Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot(df.index, df["emissionsGtC"], color = "tab:red" ); ax2.set_ylabel("Emissions (GtC)", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
             ax1.set_title("CO₂ Emissions vs Concentrations")
 
@@ -278,6 +304,7 @@ class climateScenario:
             ax2 = ax1.twinx()
 
             ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel("CO₂ Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot(df.index, df["RF"], color="tab:green"); ax2.set_ylabel("Effective Radiative Forcing (W m⁻²)", color="tab:green");  ax2.tick_params(axis="y", labelcolor="tab:green")
             ax1.set_title("CO₂ concentrations vs Radiative Forcing")
 
@@ -285,6 +312,7 @@ class climateScenario:
             ax1 = axes[2]
             ax2 = ax1.twinx()
             ax1.plot( df.index, df['cumulativeEmissionsGtC'], color="tab:purple" ); ax1.set_ylabel("Cumulative Emissions (GtC)", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
+            ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot( df.index, df["GMST"], color="tab:orange"); ax2.set_ylabel("Temp Anomaly (K)", color="tab:orange"); ax2.tick_params(axis="y", labelcolor="tab:orange")
             ax1.set_title("Cumulative Emissions vs GMST response")
 
@@ -292,6 +320,7 @@ class climateScenario:
             for ax in axes:
                 ax.set_xlabel("Year")
 
+            fig.suptitle( f"{self.name} scenario", fontsize=18, fontweight='bold', y = 1.01 )
             plt.tight_layout()
             
         else:
@@ -313,7 +342,6 @@ class climateScenario:
             axes[1].set_title("GMST Anomaly")
             axes[1].set_xlabel("Year")
             axes[1].grid(True, which='both', linestyle='--', alpha=0.6)
-
+            
+            fig.suptitle( f"{self.name} scenario", fontsize=18, fontweight='bold', y = 1.01 )
             plt.tight_layout()
-            plt.show()
-
