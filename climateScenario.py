@@ -7,13 +7,27 @@ import matplotlib.pyplot as plt
 
 class climateScenario:
     
-    def __init__( self, emissions, name = None ):
+    # Defautlt model parameters, can be overridden with **kwargs
+    DEFAULT_PARAMS = {
+        "ecs": 3.0,                             # Equilibrium Climate Sensitivity [K]
+        "ohtr": 1.23,                           # Ocean heat transport coefficient
+        "a": [0.2173, 0.2240, 0.2824, 0.2763],  # Carbon cycle reservoir fractions [-]
+        "tau": [1e6, 394.4, 36.54, 4.304],      # Reservoir time scales [years]
+    }
+    
+    def __init__( self, emissions, name = None, **kwargs ):
         """
         This Python function initializes an object with emissions data and an optional name attribute.
         
         :param emissions: The `emissions` parameter can be either a string (for presets) or a pandas DataFrame (for custom emissions data)
         :param name: The `name` parameter in the `__init__` method is an optional parameter for the custom emissions data
+        kwargs : dict
+            Override model parameters (e.g., ecs=4.5, ohtr=1.5).
         """
+        # Merge defaults with overrides
+        self.params = self.DEFAULT_PARAMS.copy()
+        self.params.update( kwargs )
+        
         if isinstance( emissions, str ):
             self.name        = name or emissions
             self.preset_name = emissions
@@ -183,8 +197,8 @@ class climateScenario:
         """
         
         # Carbon cycle parameters (from Joos et al., 2013)
-        a   = np.array( [ 0.2173, 0.2240, 0.2824, 0.2763 ] ) # [ fractions in each reservoir ]
-        tau = np.array( [ 1e6, 394.4, 36.54, 4.304 ] )       # [ time scale in years for each reservoir ]
+        a   = np.array(self.params["a"])   # fractions in each reservoir
+        tau = np.array(self.params["tau"]) # time scale in years for each reservoir
 
         # Unpack variables from self
         Evals = emissions['ppmCO2'].values
@@ -247,8 +261,8 @@ class climateScenario:
         odens     = 1000                 # kg m-3
         dthk      = np.array([300, 300, 1300, 1800])  # m
         spy       = 3600 * 24 * 365.25   # s yr-1
-        ecs       = 3.0                  # W m-2
-        ohtr      = 1.23                 # W m-2 K-1
+        ecs       = self.params["ecs"]   # K
+        ohtr      = self.params["ohtr"]  # W m-2 K-1
 
         # Initialization
         NLEV          = len( dthk )
