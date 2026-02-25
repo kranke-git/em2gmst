@@ -5,6 +5,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from constants import CO2_PI, CH4_PI
+
+
+
 class climateScenario:
     
     # Defautlt model parameters, can be overridden with **kwargs
@@ -53,6 +57,8 @@ class climateScenario:
             return self._load_sspScenario()
         elif name == 'pulseco2':
             return self._load_pulseCO2()
+        elif name == 'pulsech4':
+            return self._load_pulseCH4()
         elif name == 'abrupt-4xco2':
             return self._load_abrupt4xCO2()
         elif name.startswith("cmip7_"):
@@ -62,12 +68,22 @@ class climateScenario:
     
     def _load_pulseCO2( self ):
         """Load pulse CO2 emissions data."""
-        # Pulse CO2 scenario: 100 GtCO2 pulse in 1750
+        # Pulse CO2 scenario: 100 GtC pulse in 1750
         years = np.arange( 1750, 2001 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
-        df.loc[ 1750, 'ppmCO2']  = 100.0 / 2.12
+        df.loc[ 1750, 'ppmCO2']  = 100.0 / 2.12  # This are 100 GtC, converted to ppm for the carbon cycle model
         self.flagEmissions       = True
         return df
+    
+    def _load_pulseCH4( self ):
+        """Load pulse CH4 emissions data."""
+        # Pulse CH4 scenario: 1 GtCH4 pulse in 1750
+        years = np.arange( 1750, 2001 )
+        df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCH4'] )
+        df.loc[ 1750, 'ppmCH4']  = 1 / 2.8
+        self.flagEmissions       = True
+        return df
+
     
     def _load_abrupt4xCO2( self ):
         """Load abrupt 4xCO2 concentration data."""
@@ -109,7 +125,9 @@ class climateScenario:
         eyear    = 2100
         # Set emission flag to be false for SSP scenarios
         self.flagEmissions = False
-        return( merged.loc[ syear:eyear ]['Catm'] )
+        dfout = merged.loc[ syear:eyear ][['Catm']]
+        dfout.rename( columns={ 'Catm': 'ppmCO2' }, inplace=True )
+        return dfout
     
     def _load_cmip7scenario( self ):
         """Load CMIP7 Emissions data from the big CSV file."""
@@ -143,54 +161,109 @@ class climateScenario:
         """
         # Unpack variables from self
         emissions = self.emissions
-        # Assign time stuff and initialize variables
+        species   = [ s.replace( 'ppm', '' ) for s in emissions.columns[ emissions.columns.str.startswith( 'ppm' ) ] ]
+        NS        = len( species )
+        # Assign time stuff and initialize variables to nan
         startTime          = emissions.index.min()
         endTime            = emissions.index.max()
         tvec               = np.arange( startTime, endTime + dt, dt )
-        Catm               = np.full( int( ( endTime - startTime ) / dt ) + 1, np.nan )
+        tvecE              = emissions.index.values
+        NT                 = int( ( endTime - startTime ) / dt ) + 1
+        Catm               = np.full( (NT, NS ), np.nan )
         RFs                = Catm.copy()
-        gmst               = Catm.copy()
-        oceantemps         = np.full( ( len( tvec ), 4 ), np.nan )
-        Catm[ 0 ]          = 277.15 # Pre-industrial CO2 concentration [ppm]
-        RFs[ 0 ]           = 0.0    # Initial Radiative Forcing [W/m^2]
+        gmst               = np.full( NT, np.nan )
+        oceantemps         = np.full( ( NT, 4 ), np.nan )
+        # Initial conditions for temperatures
         gmst[ 0 ]          = 0.0    # Initial GMST anomaly [K]
-        oceantemps[ 0, : ] = 0.0 # Initial ocean temperature anomalies [K]
-        cpool              = np.zeros( ( 1, 4 ) )
+        oceantemps[ 0, : ] = 0.0    # Initial ocean temperature anomalies [K]
+        
+        # Initial condition for gas species
+        for s in species:
+            if s == 'CO2':
+                Catm[ 0, species.index( s ) ] = CO2_PI # Pre-industrial CO2 concentration [ppm]
+                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
+                cpool                         = np.zeros( ( 1, 4 ) ) # Initial carbon pool for the carbon cycle model
+            elif s == 'CH4':
+                Catm[ 0, species.index( s ) ] = CH4_PI # Pre-industrial CH4 concentration [ppm]
+                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
+            else:
+                raise ValueError(f"Unknown species '{s}' in emissions data.")
+        # Figure out emission vector to be used in the carbon cycle model (if needed)
+        if self.flagEmissions == True:
+            Et = np.zeros( NT )
+            for i in range( NT ):
+                idx = np.searchsorted( tvecE, tvec[ i ], side = 'right' ) - 1
+                Et[ i ] = emissions.iloc[ idx ]['ppmCO2'] if idx >= 0 else 0
+        
+        # Handle the pulse cases with a special initial condition
+        if self.name ==  'pulseCO2':
+            Et = np.zeros( NT )
+            cpool = self._carbonCycle( cpool, emissions['ppmCO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
+            Catm[ 0, species.index( 'CO2' ) ] = CO2_PI + np.sum( cpool )
+            RFs[  0, species.index( 'CO2' ) ] = self._radiativeForcingCO2( Catm[ 0, species.index( 'CO2' ) ] )    # Initial Radiative Forcing [W/m^2]
+        elif self.name == 'pulseCH4':
+            Et = np.zeros( NT)
+            Catm[ 0, species.index( 'CH4' ) ] = CH4_PI + emissions.iloc[ 0 ].iloc[0] if 'CH4' in species else CH4_PI
+            RFs[  0, species.index( 'CH4' ) ] = self._radiativeForcingCH4( Catm[ 0, species.index( 'CH4' ) ] + CH4_PI )    # Initial Radiative Forcing [W/m^2]
+
         # Main loop over time #
         idx = 0
         for currtime in tvec[:-1]:
             # Update the current time index
             idx += 1
-            # Carbon Cycle (skip it if we have concentrations, otherwise run it)
-            if self.flagEmissions == True:
-                cpool       = self._carbonCycle( cpool, emissions, currtime, dt )
-                Catm[ idx ] = Catm[ 0 ] + np.sum( cpool )
-            else:
-                Catm[ idx ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ]
-            # RF Model
-            RFs[ idx ]  = self._radiativeForcing( Catm[ idx ] )
+            # Loop over species to update concentrations, RFs
+            for s in species:
+                if s == 'CH4':
+                    Catm[ idx, species.index( s ) ] = self._ch4Cycle( Catm[ idx - 1, species.index( s ) ], tau = 12.0, Et = Et[ idx-1 ], dt = dt ) # Update the CH4 cycle and get new concentration
+                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx, species.index( s ) ] * 1e3 + 722 ) # Update the radiative forcing for CH4
+                elif s == 'CO2':
+                    # Carbon Cycle (skip it if we have concentrations, otherwise run it)
+                    if self.flagEmissions == True:
+                        cpool       = self._carbonCycle( cpool, Et[idx-1], dt )
+                        Catm[ idx, species.index( s ) ] = CO2_PI + np.sum( cpool )
+                    else:
+                        Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ].iloc[0]
+                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCO2( Catm[ idx, species.index( s ) ] )
             # Climate Model
-            gmst[ idx ], oceantemps[ idx, : ] = self._climateModel( RFs[ idx - 1 ], gmst[ idx - 1], oceantemps[ idx-1, : ], dt )
-        # Output stuff #
+            totalRF = np.nansum( RFs[ idx - 1, : ] )
+            gmst[ idx ], oceantemps[ idx, : ] = self._climateModel( totalRF, gmst[ idx - 1], oceantemps[ idx-1, : ], dt )
+            
+        # Output stuff (Interpolated)#
         indices     = np.searchsorted( tvec, emissions.index, side='right') - 1
-        Catm_interp = Catm[ indices ]
-        RFs_interp  = RFs[ indices ]
         gmst_interp = gmst[ indices ]
-        if self.flagEmissions == True:
-            cumulative_emissions = emissions['ppmCO2'].cumsum() * 2.12  # Convert ppm to GtC
-            self.outdf  = pd.DataFrame({'emissionsGtC': emissions['ppmCO2']*2.12,
-                                        'cumulativeEmissionsGtC': cumulative_emissions,
-                                        'Catm': Catm_interp, 
-                                        'RF': RFs_interp, 
-                                        'GMST': gmst_interp,
-                                        }, index = emissions.index )
-        else:
-            self.outdf  = pd.DataFrame({'Catm': Catm_interp, 
-                                        'RF': RFs_interp, 
-                                        'GMST': gmst_interp,
-                                        }, index = emissions.index )
+        self.outdf  = pd.DataFrame({'GMST': gmst_interp, }, index = emissions.index )
+        for s in species:
+            self.outdf[ f'Catm_{s}' ] = Catm[ indices, species.index( s ) ]
+            self.outdf[ f'RF_{s}' ]   = RFs[ indices, species.index( s ) ]
+            if self.flagEmissions == True:
+                convfac = 7.8 if s == 'CO2' else 2.8 # Convert ppm to GtC for CO2, and ppm to GtCH4 for CH4
+                self.outdf[ f'emissions_{s}' ] = emissions[ f'ppm{s}' ] * convfac  # Convert ppm to GtC for emissions
+                self.outdf[f'cumulativeEmissions_{s}'] = self.outdf[ f'emissions_{s}' ].cumsum()  # Cumulative emissions in GtC
         
-    def _carbonCycle( self, cpool, emissions, currtime, dt ):
+        # Output stuff (on the true grid)
+        self.outdf_tgrid = pd.DataFrame( index = tvec, data = { 'GMST': gmst } )
+        for s in species:
+            self.outdf_tgrid[ f'Catm_{s}' ] = Catm[ :, species.index( s ) ]
+            self.outdf_tgrid[ f'RF_{s}' ]   = RFs[ :, species.index( s ) ]
+            if self.flagEmissions == True:
+                self.outdf_tgrid[ f'emissions_{s}' ] = Et  
+                self.outdf_tgrid[f'cumulativeEmissions_{s}'] = np.cumsum( self.outdf_tgrid[ f'emissions_{s}' ] ) * dt  # Cumulative emissions in GtC
+        
+    
+    def _ch4Cycle( self, ch4, tau, Et, dt ):
+        """
+        This function simulates the methane (CH4) cycle by updating the atmospheric concentration based on emissions data and a specified time scale.
+        :param self: The `self` parameter refers to the instance of the class in which this method is defined
+        :param tau: The `tau` parameter represents the time scale for the methane cycle in years
+        :param Et: The `Et` parameter represents the emissions at the current time step
+        :param dt: The `dt` parameter represents the time step for the integration process in years
+        """
+        
+        # Update concentration using a simple exponential decay model
+        dCdt       = Et - ( ch4 / tau )
+        return ch4 + dt * dCdt
+    
+    def _carbonCycle( self, cpool, Et, dt ):
         """
         This function simulates the carbon cycle by updating the atmospheric CO2 concentration based on emissions data.
         :param self: The `self` parameter refers to the instance of the class in which this method is defined
@@ -200,12 +273,6 @@ class climateScenario:
         a   = np.array(self.params["a"])   # fractions in each reservoir
         tau = np.array(self.params["tau"]) # time scale in years for each reservoir
 
-        # Unpack variables from self
-        Evals = emissions['ppmCO2'].values
-        tvec  = emissions.index.values
-        idx   = np.searchsorted( tvec, currtime + dt/10, side = 'right' ) - 1 # Figure out where we are in time
-        Et    = Evals[ idx ] if idx >= 0 else 0
-
         # Vectorized update of all carbon reservoirs
         dydt  = a * Et - cpool / tau
         cpool = cpool + dt * dydt
@@ -213,7 +280,7 @@ class climateScenario:
         # Sum it up to get C concentrations and assign to outstruct
         return cpool
     
-    def _radiativeForcing( self, C ):
+    def _radiativeForcingCO2( self, C ):
         """
         Compute Radiative Forcing (RF) from CO2 concentration C (ppm), based on AR6 Table 6.2 parameters (similar to EnROADS).
         Parameters:
@@ -241,6 +308,25 @@ class climateScenario:
         coefC[ mask3 ] = d1
         rf             = coefC * np.log( C / C0 )
         return( rf )
+    
+    
+    def _overlap(self, M, N):
+        return 0.47 * np.log(
+            1
+            + 2.01e-5 * (M * N)**0.75
+            + 5.31e-15 * M * (M * N)**1.52
+        )
+
+    def _radiativeForcingCH4(self, M, M0=722, N0=270):
+        """
+        Radiative forcing from methane (W/m^2)
+        M  : CH4 concentration (ppb)
+        M0 : reference CH4 (ppb), preindustrial ~722
+        N0 : reference N2O (ppb), preindustrial ~270
+        """
+        return 0.036 * (np.sqrt(M) - np.sqrt(M0)) \
+            - (self._overlap(M, N0) - self._overlap(M0, N0))
+    
 
     def _climateModel( self, RF, tanm_ao, tanm_d, dt ):
         """_summary_
@@ -275,7 +361,7 @@ class climateScenario:
         layert        = np.concatenate( ( [ othk ], dthk ) )
         mlayert       = np.mean( np.vstack( ( layert[:-1], layert[1:] ) ), axis=0 )
         htc           = ohtr * mlayert[ 0 ]
-        feedbackParam = self._radiativeForcing( 277.15 * 2 ) / ecs
+        feedbackParam = self._radiativeForcingCO2( 277.15 * 2 ) / ecs
 
         # Initial condition for current step
         aoQ = tanm_ao * ao_hc
