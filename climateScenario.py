@@ -1,24 +1,13 @@
 # kranke - August 2025
 # Script to define the climateScenario class for handling emissions scenarios
 
-import pandas as pd
-import numpy as np
+import pandas            as pd
+import numpy             as np
 import matplotlib.pyplot as plt
-
-from constants import CO2_PI, CH4_PI
-
-
+from   constants         import CO2_PI, CH4_PI, DEFAULT_PARAMS, CH4_TAU
 
 class climateScenario:
-    
-    # Defautlt model parameters, can be overridden with **kwargs
-    DEFAULT_PARAMS = {
-        "ecs": 3.0,                             # Equilibrium Climate Sensitivity [K]
-        "ohtr": 1.23,                           # Ocean heat transport coefficient
-        "a": [0.2173, 0.2240, 0.2824, 0.2763],  # Carbon cycle reservoir fractions [-]
-        "tau": [1e6, 394.4, 36.54, 4.304],      # Reservoir time scales [years]
-    }
-    
+        
     def __init__( self, emissions, name = None, **kwargs ):
         """
         This Python function initializes an object with emissions data and an optional name attribute.
@@ -29,7 +18,7 @@ class climateScenario:
             Override model parameters (e.g., ecs=4.5, ohtr=1.5).
         """
         # Merge defaults with overrides
-        self.params = self.DEFAULT_PARAMS.copy()
+        self.params = DEFAULT_PARAMS.copy()
         self.params.update( kwargs )
         
         if isinstance( emissions, str ):
@@ -68,10 +57,10 @@ class climateScenario:
     
     def _load_pulseCO2( self ):
         """Load pulse CO2 emissions data."""
-        # Pulse CO2 scenario: 100 GtC pulse in 1750
+        # Pulse CO2 scenario: 1 GtC pulse in 1750
         years = np.arange( 1750, 2001 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
-        df.loc[ 1750, 'ppmCO2']  = 100.0 / 2.12  # This are 100 GtC, converted to ppm for the carbon cycle model
+        df.loc[ 1750, 'ppmCO2']  = 1.0 / 7.8  # This is 1 GtC, converted to ppm for the carbon cycle model
         self.flagEmissions       = True
         return df
     
@@ -80,7 +69,7 @@ class climateScenario:
         # Pulse CH4 scenario: 1 GtCH4 pulse in 1750
         years = np.arange( 1750, 2001 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCH4'] )
-        df.loc[ 1750, 'ppmCH4']  = 1 / 2.8
+        df.loc[ 1750, 'ppmCH4']  = 1 / 2.8 * 1e3  # This is 1 GtCH4, converted to ppb for the methane cycle model
         self.flagEmissions       = True
         return df
 
@@ -169,7 +158,8 @@ class climateScenario:
         tvec               = np.arange( startTime, endTime + dt, dt )
         tvecE              = emissions.index.values
         NT                 = int( ( endTime - startTime ) / dt ) + 1
-        Catm               = np.full( (NT, NS ), np.nan )
+        Catm               = np.full( ( NT, NS ), np.nan )
+        Et                 = np.full( ( NT, NS ), np.nan )
         RFs                = Catm.copy()
         gmst               = np.full( NT, np.nan )
         oceantemps         = np.full( ( NT, 4 ), np.nan )
@@ -190,19 +180,20 @@ class climateScenario:
                 raise ValueError(f"Unknown species '{s}' in emissions data.")
         # Figure out emission vector to be used in the carbon cycle model (if needed)
         if self.flagEmissions == True:
-            Et = np.zeros( NT )
-            for i in range( NT ):
-                idx = np.searchsorted( tvecE, tvec[ i ], side = 'right' ) - 1
-                Et[ i ] = emissions.iloc[ idx ]['ppmCO2'] if idx >= 0 else 0
+            Et = np.zeros( ( NT, NS ) )
+            for s in species:
+                for i in range( NT ):
+                    idx = np.searchsorted( tvecE, tvec[ i ], side = 'right' ) - 1
+                    Et[ i, species.index( s ) ] = emissions.iloc[ idx ][ f'ppm{s}' ] if idx >= 0 else 0
         
         # Handle the pulse cases with a special initial condition
         if self.name ==  'pulseCO2':
-            Et = np.zeros( NT )
+            Et = np.zeros( ( NT, NS ) )
             cpool = self._carbonCycle( cpool, emissions['ppmCO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
             Catm[ 0, species.index( 'CO2' ) ] = CO2_PI + np.sum( cpool )
             RFs[  0, species.index( 'CO2' ) ] = self._radiativeForcingCO2( Catm[ 0, species.index( 'CO2' ) ] )    # Initial Radiative Forcing [W/m^2]
         elif self.name == 'pulseCH4':
-            Et = np.zeros( NT)
+            Et = np.zeros( ( NT, NS ) )
             Catm[ 0, species.index( 'CH4' ) ] = CH4_PI + emissions.iloc[ 0 ].iloc[0] if 'CH4' in species else CH4_PI
             RFs[  0, species.index( 'CH4' ) ] = self._radiativeForcingCH4( Catm[ 0, species.index( 'CH4' ) ] + CH4_PI )    # Initial Radiative Forcing [W/m^2]
 
@@ -214,12 +205,12 @@ class climateScenario:
             # Loop over species to update concentrations, RFs
             for s in species:
                 if s == 'CH4':
-                    Catm[ idx, species.index( s ) ] = self._ch4Cycle( Catm[ idx - 1, species.index( s ) ], tau = 12.0, Et = Et[ idx-1 ], dt = dt ) # Update the CH4 cycle and get new concentration
-                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx, species.index( s ) ] * 1e3 + 722 ) # Update the radiative forcing for CH4
+                    Catm[ idx, species.index( s ) ] = CH4_PI + self._ch4Cycle( Catm[ idx - 1, species.index( s ) ] - CH4_PI, tau = CH4_TAU, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
+                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx, species.index( s ) ] ) # Update the radiative forcing for CH4
                 elif s == 'CO2':
                     # Carbon Cycle (skip it if we have concentrations, otherwise run it)
                     if self.flagEmissions == True:
-                        cpool       = self._carbonCycle( cpool, Et[idx-1], dt )
+                        cpool       = self._carbonCycle( cpool, Et[idx-1, species.index( s ) ], dt )
                         Catm[ idx, species.index( s ) ] = CO2_PI + np.sum( cpool )
                     else:
                         Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ].iloc[0]
@@ -246,7 +237,7 @@ class climateScenario:
             self.outdf_tgrid[ f'Catm_{s}' ] = Catm[ :, species.index( s ) ]
             self.outdf_tgrid[ f'RF_{s}' ]   = RFs[ :, species.index( s ) ]
             if self.flagEmissions == True:
-                self.outdf_tgrid[ f'emissions_{s}' ] = Et  
+                self.outdf_tgrid[ f'emissions_{s}' ] = Et[ :, species.index( s ) ]
                 self.outdf_tgrid[f'cumulativeEmissions_{s}'] = np.cumsum( self.outdf_tgrid[ f'emissions_{s}' ] ) * dt  # Cumulative emissions in GtC
         
     
@@ -380,11 +371,13 @@ class climateScenario:
         # Post-processing
         return aoQnew / ao_hc, dQnew / d_hc
     
-    def plotOutput( self ):
+    def plotOutput( self, species = 'CO2' ):
         """
         This function plots the output of the climate scenario, including CO2 concentration, emissions, radiative forcing, and GMST.
         """
         df = self.outdf
+        df["Catm"] = df[ f'Catm_{species}' ]
+        df["RF"]   = df[ f'RF_{species}' ]
         
         if self.flagEmissions:
         
@@ -394,27 +387,27 @@ class climateScenario:
             ax1 = axes[ 0 ]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel("CO₂ Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
-            ax2.plot(df.index, df["emissionsGtC"], color = "tab:red" ); ax2.set_ylabel("Emissions (GtC)", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
-            ax1.set_title("CO₂ Emissions vs Concentrations")
+            ax2.plot(df.index, df[f'emissions_{species}'], color = "tab:red" ); ax2.set_ylabel(f"{species} Emissions", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
+            ax1.set_title(f"{species} Emissions vs Concentrations")
 
             # --- Panel 2 ---
             ax1 = axes[1]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel("CO₂ Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot(df.index, df["RF"], color="tab:green"); ax2.set_ylabel("Effective Radiative Forcing (W m⁻²)", color="tab:green");  ax2.tick_params(axis="y", labelcolor="tab:green")
-            ax1.set_title("CO₂ concentrations vs Radiative Forcing")
+            ax1.set_title(f"{species} concentrations vs Radiative Forcing")
 
             # --- Panel 3 ---
             ax1 = axes[2]
             ax2 = ax1.twinx()
-            ax1.plot( df.index, df['cumulativeEmissionsGtC'], color="tab:purple" ); ax1.set_ylabel("Cumulative Emissions (GtC)", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
+            ax1.plot( df.index, df[f'cumulativeEmissions_{species}'], color="tab:purple" ); ax1.set_ylabel(f"Cumulative {species} Emissions", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot( df.index, df["GMST"], color="tab:orange"); ax2.set_ylabel("Temp Anomaly (K)", color="tab:orange"); ax2.tick_params(axis="y", labelcolor="tab:orange")
-            ax1.set_title("Cumulative Emissions vs GMST response")
+            ax1.set_title(f"Cumulative {species} Emissions vs GMST response")
 
             # Shared X-axis label
             for ax in axes:
