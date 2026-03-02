@@ -4,7 +4,9 @@
 import pandas            as pd
 import numpy             as np
 import matplotlib.pyplot as plt
+import matplotlib        as mpl
 from   constants         import CO2_PI, CH4_PI, DEFAULT_PARAMS, CH4_TAU
+
 
 class climateScenario:
         
@@ -60,7 +62,7 @@ class climateScenario:
         # Pulse CO2 scenario: 1 GtC pulse in 1750
         years = np.arange( 1750, 2001 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
-        df.loc[ 1750, 'ppmCO2']  = 1.0 / 7.8  # This is 1 GtC, converted to ppm for the carbon cycle model
+        df.loc[ 1750, 'ppmCO2']  = self.params['pulse_size'] / 1e15 / 7.8  # Assume pulse_size is in grams
         self.flagEmissions       = True
         return df
     
@@ -68,8 +70,8 @@ class climateScenario:
         """Load pulse CH4 emissions data."""
         # Pulse CH4 scenario: 1 GtCH4 pulse in 1750
         years = np.arange( 1750, 2001 )
-        df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCH4'] )
-        df.loc[ 1750, 'ppmCH4']  = 1 / 2.8 * 1e3  # This is 1 GtCH4, converted to ppb for the methane cycle model
+        df = pd.DataFrame( index = years, data = 0.0, columns = ['ppbCH4'] )
+        df.loc[ 1750, 'ppbCH4']  = self.params['pulse_size'] / 1e12 / 2.8  # Assume pulse_size is in grams
         self.flagEmissions       = True
         return df
 
@@ -150,7 +152,13 @@ class climateScenario:
         """
         # Unpack variables from self
         emissions = self.emissions
-        species   = [ s.replace( 'ppm', '' ) for s in emissions.columns[ emissions.columns.str.startswith( 'ppm' ) ] ]
+        species_units = {
+            c[3:]: c[:3]
+            for c in emissions.columns
+            if c.startswith(('ppm', 'ppb'))
+        }        
+        species = list( species_units.keys() )
+        units   = list( species_units.values() )
         NS        = len( species )
         # Assign time stuff and initialize variables to nan
         startTime          = emissions.index.min()
@@ -184,18 +192,18 @@ class climateScenario:
             for s in species:
                 for i in range( NT ):
                     idx = np.searchsorted( tvecE, tvec[ i ], side = 'right' ) - 1
-                    Et[ i, species.index( s ) ] = emissions.iloc[ idx ][ f'ppm{s}' ] if idx >= 0 else 0
+                    Et[ i, species.index( s ) ] = emissions.iloc[ idx ][ f'{units[species.index(s)]}{s}' ] if idx >= 0 else 0
         
         # Handle the pulse cases with a special initial condition
         if self.name ==  'pulseCO2':
             Et = np.zeros( ( NT, NS ) )
-            cpool = self._carbonCycle( cpool, emissions['ppmCO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
+            cpool = self._carbonCycle( cpool, emissions[f'{units[species.index("CO2")]}CO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
             Catm[ 0, species.index( 'CO2' ) ] = CO2_PI + np.sum( cpool )
             RFs[  0, species.index( 'CO2' ) ] = self._radiativeForcingCO2( Catm[ 0, species.index( 'CO2' ) ] )    # Initial Radiative Forcing [W/m^2]
         elif self.name == 'pulseCH4':
             Et = np.zeros( ( NT, NS ) )
-            Catm[ 0, species.index( 'CH4' ) ] = CH4_PI + emissions.iloc[ 0 ].iloc[0] if 'CH4' in species else CH4_PI
-            RFs[  0, species.index( 'CH4' ) ] = self._radiativeForcingCH4( Catm[ 0, species.index( 'CH4' ) ] + CH4_PI )    # Initial Radiative Forcing [W/m^2]
+            Catm[ 0, species.index( 'CH4' ) ] = CH4_PI + emissions.iloc[ 0 ][ f'{units[species.index("CH4")]}CH4' ] if 'CH4' in species else CH4_PI
+            RFs[  0, species.index( 'CH4' ) ] = self._radiativeForcingCH4( Catm[ 0, species.index( 'CH4' ) ] )    # Initial Radiative Forcing [W/m^2]
 
         # Main loop over time #
         idx = 0
@@ -206,15 +214,15 @@ class climateScenario:
             for s in species:
                 if s == 'CH4':
                     Catm[ idx, species.index( s ) ] = CH4_PI + self._ch4Cycle( Catm[ idx - 1, species.index( s ) ] - CH4_PI, tau = CH4_TAU, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
-                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx, species.index( s ) ] ) # Update the radiative forcing for CH4
+                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx - 1, species.index( s ) ] ) # Update the radiative forcing for CH4
                 elif s == 'CO2':
                     # Carbon Cycle (skip it if we have concentrations, otherwise run it)
                     if self.flagEmissions == True:
                         cpool       = self._carbonCycle( cpool, Et[idx-1, species.index( s ) ], dt )
                         Catm[ idx, species.index( s ) ] = CO2_PI + np.sum( cpool )
                     else:
-                        Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ].iloc[0]
-                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCO2( Catm[ idx, species.index( s ) ] )
+                        Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ][ f'{units[species.index(s)]}{s}' ]
+                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCO2( Catm[ idx - 1, species.index( s ) ] )
             # Climate Model
             totalRF = np.nansum( RFs[ idx - 1, : ] )
             gmst[ idx ], oceantemps[ idx, : ] = self._climateModel( totalRF, gmst[ idx - 1], oceantemps[ idx-1, : ], dt )
@@ -228,7 +236,7 @@ class climateScenario:
             self.outdf[ f'RF_{s}' ]   = RFs[ indices, species.index( s ) ]
             if self.flagEmissions == True:
                 convfac = 7.8 if s == 'CO2' else 2.8 # Convert ppm to GtC for CO2, and ppm to GtCH4 for CH4
-                self.outdf[ f'emissions_{s}' ] = emissions[ f'ppm{s}' ] * convfac  # Convert ppm to GtC for emissions
+                self.outdf[ f'emissions_{s}' ] = emissions[ f'{units[species.index(s)]}{s}' ] * convfac  # Convert ppm to GtC for emissions
                 self.outdf[f'cumulativeEmissions_{s}'] = self.outdf[ f'emissions_{s}' ].cumsum()  # Cumulative emissions in GtC
         
         # Output stuff (on the true grid)
@@ -371,13 +379,17 @@ class climateScenario:
         # Post-processing
         return aoQnew / ao_hc, dQnew / d_hc
     
-    def plotOutput( self, species = 'CO2' ):
+    def plotOutput( self, species = 'CO2', units = 'ppm', unitsE = 'Gt', title = None, family = 'monospace', **kwargs ):
         """
         This function plots the output of the climate scenario, including CO2 concentration, emissions, radiative forcing, and GMST.
         """
         df = self.outdf
         df["Catm"] = df[ f'Catm_{species}' ]
         df["RF"]   = df[ f'RF_{species}' ]
+        mpl.rcParams['font.family'] = family
+
+        if title is None:
+            title = f"{self.name} scenario"
         
         if self.flagEmissions:
         
@@ -387,16 +399,16 @@ class climateScenario:
             ax1 = axes[ 0 ]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
-            ax2.plot(df.index, df[f'emissions_{species}'], color = "tab:red" ); ax2.set_ylabel(f"{species} Emissions", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
+            ax2.plot(df.index, df[f'emissions_{species}'], color = "tab:red" ); ax2.set_ylabel(f"{species} Emissions ({unitsE}{species})", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
             ax1.set_title(f"{species} Emissions vs Concentrations")
 
             # --- Panel 2 ---
             ax1 = axes[1]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot(df.index, df["RF"], color="tab:green"); ax2.set_ylabel("Effective Radiative Forcing (W m⁻²)", color="tab:green");  ax2.tick_params(axis="y", labelcolor="tab:green")
             ax1.set_title(f"{species} concentrations vs Radiative Forcing")
@@ -404,7 +416,7 @@ class climateScenario:
             # --- Panel 3 ---
             ax1 = axes[2]
             ax2 = ax1.twinx()
-            ax1.plot( df.index, df[f'cumulativeEmissions_{species}'], color="tab:purple" ); ax1.set_ylabel(f"Cumulative {species} Emissions", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
+            ax1.plot( df.index, df[f'cumulativeEmissions_{species}'], color="tab:purple" ); ax1.set_ylabel(f"Cumulative {species} Emissions ({unitsE}{species})", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot( df.index, df["GMST"], color="tab:orange"); ax2.set_ylabel("Temp Anomaly (K)", color="tab:orange"); ax2.tick_params(axis="y", labelcolor="tab:orange")
             ax1.set_title(f"Cumulative {species} Emissions vs GMST response")
@@ -413,7 +425,7 @@ class climateScenario:
             for ax in axes:
                 ax.set_xlabel("Year")
 
-            fig.suptitle( f"{self.name} scenario", fontsize=18, fontweight='bold', y = 1.01 )
+            fig.suptitle( title, fontsize=18, fontweight='bold', y = 1.01 )
             plt.tight_layout()
             
         else:
@@ -423,7 +435,7 @@ class climateScenario:
             ax1 = axes[0]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel("CO₂ Concentration (ppm)", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"CO₂ Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax2.plot(df.index, df["RF"], color="tab:green");  ax2.set_ylabel( "Effective Radiative Forcing (W m⁻²)", color="tab:green" ); ax2.tick_params(axis="y", labelcolor="tab:green")
             ax1.set_title("CO₂ concentrations vs Radiative Forcing")
             ax1.set_xlabel("Year")
@@ -436,5 +448,7 @@ class climateScenario:
             axes[1].set_xlabel("Year")
             axes[1].grid(True, which='both', linestyle='--', alpha=0.6)
             
-            fig.suptitle( f"{self.name} scenario", fontsize=18, fontweight='bold', y = 1.01 )
+            fig.suptitle( title, fontsize=18, fontweight='bold', y = 1.01 )
             plt.tight_layout()
+            
+        return fig

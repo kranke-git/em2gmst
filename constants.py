@@ -17,4 +17,5 @@ DEFAULT_PARAMS = {
     "ohtr": 1.23,                           # Ocean heat transport coefficient
     "a": [0.2173, 0.2240, 0.2824, 0.2763],  # Carbon cycle reservoir fractions [-]
     "tau": [1e6, 394.4, 36.54, 4.304],      # Reservoir time scales [years]
+    "pulse_size": 1e15,                     # Size of the pulse emission [g]; default is 1 Gt =  1 Pg = 1e15 g = 1e12 kg
 }
