@@ -5,7 +5,8 @@ import pandas            as pd
 import numpy             as np
 import matplotlib.pyplot as plt
 import matplotlib        as mpl
-from   constants         import CO2_PI, CH4_PI, DEFAULT_PARAMS, CH4_TAU
+from   constants         import CO2_PI, CH4_PI, DEFAULT_PARAMS, CH4_TAU, SPECIES
+from   physicalUtils     import ch4_n20_overlap
 
 
 class climateScenario:
@@ -34,6 +35,11 @@ class climateScenario:
             self.emissions   = pd.DataFrame( emissions.sort_index() )
             self.emissions['ppmCO2'] = self.emissions['CO2emissions_GtC'] / 2.12  # Convert GtC to ppm for the carbon cycle model
             self.flagEmissions = True
+        elif isinstance( emissions, pd.DataFrame ):
+            self.name        = name or "Custom"
+            self.preset_name = None
+            self.emissions   = emissions.sort_index()
+            self.flagEmissions = True
         else:
             raise ValueError("emissions must be a string or a pandas Series.")
 
@@ -44,6 +50,8 @@ class climateScenario:
 
         if name == "historical":
             return self._load_historical()
+        elif name == "historical_ch4":
+            return self._load_historical_ch4()
         elif name.startswith("ssp"):
             return self._load_sspScenario()
         elif name == 'pulseco2':
@@ -80,8 +88,8 @@ class climateScenario:
         """Load abrupt 4xCO2 concentration data."""
         # Abrupt 4xCO2 scenario: 4x pre-industrial CO2 concentration in 1750
         years = np.arange( 1750, 2001 )
-        df    = pd.DataFrame( index = years, data = 0.0, columns = ['Catm'] )
-        df[ 'Catm' ]       = 277.15 * 4.0
+        df    = pd.DataFrame( index = years, data = 0.0, columns = ['Catm_CO2'] )
+        df[ 'Catm_CO2' ]       = 277.15 * 4.0
         self.flagEmissions = False
         return df
 
@@ -93,6 +101,16 @@ class climateScenario:
         df['ppmCO2'] = ( df['FF'] + df['LU'] ) / 2.12         #  ppm/year; for the carbon cycle model
         self.flagEmissions = True
         return df 
+    
+    def _load_historical_ch4( self ):
+        """Load historical CH4 emissions data from a CSV file."""
+        fair_emissions_file = '/home/kranke/Documents/ResearchProjects/BC3/Data/emissionsdata/CEDS_CH4_global_emissions_by_CEDS_sector_v_2019_12_23.csv'
+        df                  = pd.read_csv( fair_emissions_file, header = None, names = ['Year', 'Emissions'] )  
+        df['ppbCH4']        = df['Emissions'] / 2.8
+        self.flagEmissions = True
+        df.set_index( 'Year', inplace=True )
+
+        return df
     
     def _load_sspScenario( self ):
         """Load SSP Concentrations data from a CSV file."""
@@ -186,6 +204,7 @@ class climateScenario:
                 RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
             else:
                 raise ValueError(f"Unknown species '{s}' in emissions data.")
+            
         # Figure out emission vector to be used in the carbon cycle model (if needed)
         if self.flagEmissions == True:
             Et = np.zeros( ( NT, NS ) )
@@ -213,7 +232,7 @@ class climateScenario:
             # Loop over species to update concentrations, RFs
             for s in species:
                 if s == 'CH4':
-                    Catm[ idx, species.index( s ) ] = CH4_PI + self._ch4Cycle( Catm[ idx - 1, species.index( s ) ] - CH4_PI, tau = CH4_TAU, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
+                    Catm[ idx, species.index( s ) ] = CH4_PI + self._gasCycle( Catm[ idx - 1, species.index( s ) ] - CH4_PI, tau = CH4_TAU, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
                     RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx - 1, species.index( s ) ] ) # Update the radiative forcing for CH4
                 elif s == 'CO2':
                     # Carbon Cycle (skip it if we have concentrations, otherwise run it)
@@ -249,18 +268,18 @@ class climateScenario:
                 self.outdf_tgrid[f'cumulativeEmissions_{s}'] = np.cumsum( self.outdf_tgrid[ f'emissions_{s}' ] ) * dt  # Cumulative emissions in GtC
         
     
-    def _ch4Cycle( self, ch4, tau, Et, dt ):
+    def _gasCycle( self, gas, tau, Et, dt ):
         """
-        This function simulates the methane (CH4) cycle by updating the atmospheric concentration based on emissions data and a specified time scale.
+        This function simulates the gas cycle by updating the atmospheric concentration based on emissions data and a specified time scale.
         :param self: The `self` parameter refers to the instance of the class in which this method is defined
-        :param tau: The `tau` parameter represents the time scale for the methane cycle in years
+        :param tau: The `tau` parameter represents the time scale for the gas cycle in years
         :param Et: The `Et` parameter represents the emissions at the current time step
         :param dt: The `dt` parameter represents the time step for the integration process in years
         """
         
         # Update concentration using a simple exponential decay model
-        dCdt       = Et - ( ch4 / tau )
-        return ch4 + dt * dCdt
+        dCdt       = Et - ( gas / tau )
+        return gas + dt * dCdt
     
     def _carbonCycle( self, cpool, Et, dt ):
         """
@@ -309,12 +328,6 @@ class climateScenario:
         return( rf )
     
     
-    def _overlap(self, M, N):
-        return 0.47 * np.log(
-            1
-            + 2.01e-5 * (M * N)**0.75
-            + 5.31e-15 * M * (M * N)**1.52
-        )
 
     def _radiativeForcingCH4(self, M, M0=722, N0=270):
         """
@@ -323,8 +336,8 @@ class climateScenario:
         M0 : reference CH4 (ppb), preindustrial ~722
         N0 : reference N2O (ppb), preindustrial ~270
         """
-        return 0.036 * (np.sqrt(M) - np.sqrt(M0)) \
-            - (self._overlap(M, N0) - self._overlap(M0, N0))
+
+        return 0.036 * (np.sqrt(M) - np.sqrt(M0)) - (ch4_n20_overlap(M, N0) - ch4_n20_overlap(M0, N0))
     
 
     def _climateModel( self, RF, tanm_ao, tanm_d, dt ):
@@ -379,15 +392,27 @@ class climateScenario:
         # Post-processing
         return aoQnew / ao_hc, dQnew / d_hc
     
-    def plotOutput( self, species = 'CO2', units = 'ppm', unitsE = 'Gt', title = None, family = 'monospace', **kwargs ):
+    def plotOutput( self, species = 'CO2', title = None, family = 'monospace', Catm_anomaly_flag = False, **kwargs ):
         """
         This function plots the output of the climate scenario, including CO2 concentration, emissions, radiative forcing, and GMST.
         """
-        df = self.outdf
-        df["Catm"] = df[ f'Catm_{species}' ]
-        df["RF"]   = df[ f'RF_{species}' ]
         mpl.rcParams['font.family'] = family
 
+        # Handle species name for labeling
+        units  = SPECIES[species]['units']
+        unitsE = SPECIES[species]['emissUnits']
+        if species == 'ICO2' or species == 'CO2rem' or species == 'CO2red':
+            species = 'CO2'        
+        df = self.outdf.copy()
+        df["Catm"] = df[ f'Catm_{species}' ]
+        df["RF"]   = df[ f'RF_{species}' ]
+        if Catm_anomaly_flag == True:
+            df["Catm"] = df["Catm"] - df["Catm"].iloc[0]  # Convert to anomaly by subtracting the initial value
+            ylab_catm = f"{species} Concentration Anomaly ({units})"
+        else:
+            ylab_catm = f"{species} Concentration ({units})"
+
+            
         if title is None:
             title = f"{self.name} scenario"
         
@@ -399,16 +424,16 @@ class climateScenario:
             ax1 = axes[ 0 ]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(ylab_catm, color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
-            ax2.plot(df.index, df[f'emissions_{species}'], color = "tab:red" ); ax2.set_ylabel(f"{species} Emissions ({unitsE}{species})", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
+            ax2.plot(df.index, df[f'emissions_{species}'], color = "tab:red" ); ax2.set_ylabel(f"{species} Emissions ({unitsE})", color="tab:red");ax2.tick_params(axis="y", labelcolor="tab:red")
             ax1.set_title(f"{species} Emissions vs Concentrations")
 
             # --- Panel 2 ---
             ax1 = axes[1]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"{species} Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(ylab_catm, color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot(df.index, df["RF"], color="tab:green"); ax2.set_ylabel("Effective Radiative Forcing (W m⁻²)", color="tab:green");  ax2.tick_params(axis="y", labelcolor="tab:green")
             ax1.set_title(f"{species} concentrations vs Radiative Forcing")
@@ -416,7 +441,7 @@ class climateScenario:
             # --- Panel 3 ---
             ax1 = axes[2]
             ax2 = ax1.twinx()
-            ax1.plot( df.index, df[f'cumulativeEmissions_{species}'], color="tab:purple" ); ax1.set_ylabel(f"Cumulative {species} Emissions ({unitsE}{species})", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
+            ax1.plot( df.index, df[f'cumulativeEmissions_{species}'], color="tab:purple" ); ax1.set_ylabel(f"Cumulative {species} Emissions ({unitsE})", color="tab:purple"); ax1.tick_params(axis="y", labelcolor="tab:purple")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
             ax2.plot( df.index, df["GMST"], color="tab:orange"); ax2.set_ylabel("Temp Anomaly (K)", color="tab:orange"); ax2.tick_params(axis="y", labelcolor="tab:orange")
             ax1.set_title(f"Cumulative {species} Emissions vs GMST response")
@@ -435,14 +460,14 @@ class climateScenario:
             ax1 = axes[0]
             ax2 = ax1.twinx()
 
-            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(f"CO₂ Concentration ({units})", color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
+            ax1.plot(df.index, df["Catm"], color="tab:blue"); ax1.set_ylabel(ylab_catm, color="tab:blue"); ax1.tick_params(axis="y", labelcolor="tab:blue")
             ax2.plot(df.index, df["RF"], color="tab:green");  ax2.set_ylabel( "Effective Radiative Forcing (W m⁻²)", color="tab:green" ); ax2.tick_params(axis="y", labelcolor="tab:green")
-            ax1.set_title("CO₂ concentrations vs Radiative Forcing")
+            ax1.set_title(f"{species} concentrations vs Radiative Forcing")
             ax1.set_xlabel("Year")
             ax1.grid( True, which='both', linestyle='--', alpha=0.6)  # Grid on left axis
 
             # --- Panel 2 (MATLAB figure 3) ---
-            axes[1].plot(df.index, df["GMST"], color="tab:orange"); axes[1].set_ylabel("Temperature Anomaly wrt PI (K)", color="tab:orange")
+            axes[1].plot(df.index, df["GMST"], color="tab:orange"); axes[1].set_ylabel("Temperature Anomaly (K)", color="tab:orange")
             axes[1].tick_params(axis="y", labelcolor="tab:orange")
             axes[1].set_title("GMST Anomaly")
             axes[1].set_xlabel("Year")

@@ -2,6 +2,7 @@
 
 import matplotlib.pyplot as plt
 from   climateScenario import climateScenario
+import pandas as pd
 
 GWP100_CH4     = 28 # Global Warming Potential of CH4 over 100 years, relative to CO2
 pulse_size_CO2 = 1000e3 # This is in grams (1000 kg = 1 tonne = 0.001 Gt)
@@ -41,3 +42,7 @@ for horizon in horizons:
     gtps_ch4.append( pulseCH4_1kg.outdf['GMST'].loc[1750 + horizon]  ) # K/kg
 
 ratio = [ gtps_ch4[i] / gtps_co2[i] for i in range(len(horizons)) ]
+
+ch4_historical = climateScenario( 'historical_ch4' )
+ch4_historical.integrate()
+figHistorical = ch4_historical.plotOutput( species = 'CH4', units = 'ppb', title = 'Historical CH4 emissions and GMST response' )
