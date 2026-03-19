@@ -262,7 +262,7 @@ class climateScenario:
             self.outdf[ f'Catm_{s}' ] = Catm[ indices, species.index( s ) ]
             self.outdf[ f'RF_{s}' ]   = RFs[ indices, species.index( s ) ]
             if self.flagEmissions == True:
-                convfac = 7.8 if s == 'CO2' else 2.8 # Convert ppm to GtC for CO2, and ppm to GtCH4 for CH4
+                convfac = 1 / SPECIES[ s ]['emission_conv']
                 self.outdf[ f'emissions_{s}' ] = emissions[ f'{units[species.index(s)]}{s}' ] * convfac  # Convert ppm to GtC for emissions
                 self.outdf[f'cumulativeEmissions_{s}'] = self.outdf[ f'emissions_{s}' ].cumsum()  # Cumulative emissions in GtC
         
@@ -434,7 +434,7 @@ class climateScenario:
 
         # Handle species name for labeling
         units  = SPECIES[species]['units']
-        unitsE = SPECIES[species]['emissUnits']
+        unitsE = f'kg{species}'
         if species == 'ICO2' or species == 'CO2rem' or species == 'CO2red':
             species = 'CO2'        
         df = self.outdf.copy()
