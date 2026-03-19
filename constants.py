@@ -22,9 +22,9 @@ DEFAULT_PARAMS = {
 
 # emission conv is the factor to covert from kg of that species to ppm, ppb or whatever units is used in the RF calculations
 SPECIES = {
-    "CH4":    {'emissUnits': 'MtCH4', 'units':'ppb', "GWP100": 28, "MOLAR_MASS": M_CH4, "C_PI": CH4_PI, 'emission_conv': 1 / 1e9 / 2.8, "TAU": CH4_TAU, "molecule":"CH4"},
-    "CO2red": {'emissUnits': 'GtCO2', 'units':'ppm', "GWP100": 1,  "MOLAR_MASS": M_CO2, "C_PI": CO2_PI, 'emission_conv': 1 / 1e12 / 7.8, "molecule":"CO2" },
-    "CO2rem": {'emissUnits': 'GtCO2', 'units':'ppm', "GWP100": 1,  "MOLAR_MASS": M_CO2, "C_PI": CO2_PI, 'emission_conv': 1 / 1e12 / 7.8, "molecule":"CO2" },
-    "ICO2":   {'emissUnits': 'GtCO2', 'units':'ppm', "GWP100": 1,  "MOLAR_MASS": M_CO2, "C_PI": CO2_PI, 'emission_conv': 1 / 1e12 / 7.8, "molecule":"CO2" },
-    "CO2":    {'emissUnits': 'GtCO2', 'units':'ppm', "GWP100": 1,  "MOLAR_MASS": M_CO2, "C_PI": CO2_PI, 'emission_conv': 1 / 1e12 / 7.8, "molecule":"CO2" },
+    "CO2":      {'emissUnits': 'GtCO2',      'units':'ppm', "GWP100": 1,     "MOLAR_MASS": M_CO2,  "C_PI": CO2_PI, 'emission_conv': 1 / 1e12 / 7.8,},
+    "CH4":      {'emissUnits': 'MtCH4',      'units':'ppb', "GWP100": 28,    "MOLAR_MASS": M_CH4,  "C_PI": CH4_PI, 'emission_conv': 1 / 1e9 / 2.8, "tau": CH4_TAU, "molecule":"CH4", 'f1': 0.000, 'f2': 0.000, 'f3': 0.036},
+    "SF6":      {'emissUnits': 'ktSF6',      'units':'ppt', "GWP100": 23500, "MOLAR_MASS": 146.06, "C_PI": 0,      'emission_conv': 1 / 1e6 / 26, "tau": 3200, "molecule":"SF6",      'f1':0.0, 'f2': 0.57 / 1e3, 'f3': 0 }, 
+    'HFC-134a': {'emissUnits': 'ktHFC-134a', 'units':'ppt', "GWP100": 1300,  "MOLAR_MASS": 102.03, "C_PI": 0,      'emission_conv': 1 / 1e6 / 18, "tau": 13.4, "molecule":"HFC-134a", 'f1':0.0, 'f2': 0.16 / 1e3, 'f3': 0 }, 
+    'N2O':      {'emissUnits': 'MtN2O',      'units':'ppb', "GWP100": 265,   "MOLAR_MASS": 44.013, "C_PI": 270,    'emission_conv': 1 / 1e9 / 7.8, "tau": 121, "molecule":"N2O",      'f1':0.0, 'f2': 0.0, 'f3': 0.12}
 }

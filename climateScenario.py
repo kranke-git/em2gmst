@@ -5,8 +5,7 @@ import pandas            as pd
 import numpy             as np
 import matplotlib.pyplot as plt
 import matplotlib        as mpl
-from   constants         import CO2_PI, CH4_PI, DEFAULT_PARAMS, CH4_TAU, SPECIES
-from   physicalUtils     import ch4_n20_overlap
+from   constants         import CO2_PI, DEFAULT_PARAMS, SPECIES
 
 
 class climateScenario:
@@ -52,16 +51,17 @@ class climateScenario:
             return self._load_historical()
         elif name == "historical_ch4":
             return self._load_historical_ch4()
-        elif name.startswith("ssp"):
-            return self._load_sspScenario()
         elif name == 'pulseco2':
             return self._load_pulseCO2()
-        elif name == 'pulsech4':
-            return self._load_pulseCH4()
         elif name == 'abrupt-4xco2':
             return self._load_abrupt4xCO2()
         elif name.startswith("cmip7_"):
             return self._load_cmip7scenario()
+        elif name.startswith("pulse"):
+            # we only get here if not pulseCO2, this is for other non-CO2 gases
+            return self._load_pulseNonCO2()
+        elif name.startswith("ssp"):
+            return self._load_sspScenario()
         else:
             raise ValueError(f"Unknown preset '{name}'")
     
@@ -70,19 +70,19 @@ class climateScenario:
         # Pulse CO2 scenario: 1 GtC pulse in 1750
         years = np.arange( 1750, 2001 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
-        df.loc[ 1750, 'ppmCO2']  = self.params['pulse_size'] / 1e15 / 7.8  # Assume pulse_size is in grams
+        df.loc[ 1750, 'ppmCO2']  = self.params['pulse_size']  * SPECIES[ "CO2" ]["emission_conv"]  # Assume pulse_size is in kgCO2
         self.flagEmissions       = True
         return df
     
-    def _load_pulseCH4( self ):
-        """Load pulse CH4 emissions data."""
-        # Pulse CH4 scenario: 1 GtCH4 pulse in 1750
-        years = np.arange( 1750, 2001 )
-        df = pd.DataFrame( index = years, data = 0.0, columns = ['ppbCH4'] )
-        df.loc[ 1750, 'ppbCH4']  = self.params['pulse_size'] / 1e12 / 2.8  # Assume pulse_size is in grams
+    def _load_pulseNonCO2( self ):
+        """Load pulse non-CO2 emissions data."""
+        # Pulse non-CO2 scenario: pulse_size in kilograms of that species in 1750
+        species = self.name.replace( "pulse", "" ) # Extract the species name from the preset name (e.g., 'CH4' from 'pulseCH4')
+        years   = np.arange( 1750, 2001 )
+        df      = pd.DataFrame( index = years, data = 0.0, columns = [f'{SPECIES[ species ]["units"]}{species}'] )
+        df.loc[ 1750, f'{SPECIES[ species ]["units"]}{species}']  = self.params['pulse_size']  * SPECIES[ species]["emission_conv"]  # Assume pulse_size is in kg of the species
         self.flagEmissions       = True
         return df
-
     
     def _load_abrupt4xCO2( self ):
         """Load abrupt 4xCO2 concentration data."""
@@ -173,11 +173,11 @@ class climateScenario:
         species_units = {
             c[3:]: c[:3]
             for c in emissions.columns
-            if c.startswith(('ppm', 'ppb'))
+            if c.startswith(('ppm', 'ppb', 'ppt'))
         }        
         species = list( species_units.keys() )
         units   = list( species_units.values() )
-        NS        = len( species )
+        NS      = len( species )
         # Assign time stuff and initialize variables to nan
         startTime          = emissions.index.min()
         endTime            = emissions.index.max()
@@ -199,11 +199,9 @@ class climateScenario:
                 Catm[ 0, species.index( s ) ] = CO2_PI # Pre-industrial CO2 concentration [ppm]
                 RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
                 cpool                         = np.zeros( ( 1, 4 ) ) # Initial carbon pool for the carbon cycle model
-            elif s == 'CH4':
-                Catm[ 0, species.index( s ) ] = CH4_PI # Pre-industrial CH4 concentration [ppm]
-                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
             else:
-                raise ValueError(f"Unknown species '{s}' in emissions data.")
+                Catm[ 0, species.index( s ) ] = SPECIES[ s ][ 'C_PI' ] # Pre-industrial CH4 concentration [ppm]
+                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
             
         # Figure out emission vector to be used in the carbon cycle model (if needed)
         if self.flagEmissions == True:
@@ -215,14 +213,18 @@ class climateScenario:
         
         # Handle the pulse cases with a special initial condition
         if self.name ==  'pulseCO2':
-            Et = np.zeros( ( NT, NS ) )
+            Et = np.zeros( ( NT, 1 ) )
             cpool = self._carbonCycle( cpool, emissions[f'{units[species.index("CO2")]}CO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
             Catm[ 0, species.index( 'CO2' ) ] = CO2_PI + np.sum( cpool )
             RFs[  0, species.index( 'CO2' ) ] = self._radiativeForcingCO2( Catm[ 0, species.index( 'CO2' ) ] )    # Initial Radiative Forcing [W/m^2]
-        elif self.name == 'pulseCH4':
-            Et = np.zeros( ( NT, NS ) )
-            Catm[ 0, species.index( 'CH4' ) ] = CH4_PI + emissions.iloc[ 0 ][ f'{units[species.index("CH4")]}CH4' ] if 'CH4' in species else CH4_PI
-            RFs[  0, species.index( 'CH4' ) ] = self._radiativeForcingCH4( Catm[ 0, species.index( 'CH4' ) ] )    # Initial Radiative Forcing [W/m^2]
+        elif self.name.startswith( 'pulse' ):
+            Et      = np.zeros( ( NT, 1 ) )
+            Catm[ 0, species.index( species[ 0 ] ) ] = SPECIES[ species[ 0 ] ][ 'C_PI' ] + emissions.iloc[ 0 ][ f'{SPECIES[ species[ 0 ]]["units"]}{species[ 0 ]}' ] # Set the initial concentration based on the pulse size
+            C0      = SPECIES[ species[ 0 ] ][ 'C_PI' ]
+            f1      = SPECIES[ species[ 0 ] ][ 'f1' ]
+            f2      = SPECIES[ species[ 0 ] ][ 'f2' ]
+            f3      = SPECIES[ species[ 0 ] ][ 'f3' ]
+            RFs[  0, species.index( species[ 0 ] ) ] = self._gasRadiativeForcing( f1, f2, f3, Catm[ 0, species.index( species[ 0 ] ) ], C0 ) # Update the radiative forcing for CH4 based on the initial concentration
 
         # Main loop over time #
         idx = 0
@@ -231,10 +233,7 @@ class climateScenario:
             idx += 1
             # Loop over species to update concentrations, RFs
             for s in species:
-                if s == 'CH4':
-                    Catm[ idx, species.index( s ) ] = CH4_PI + self._gasCycle( Catm[ idx - 1, species.index( s ) ] - CH4_PI, tau = CH4_TAU, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
-                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCH4( Catm[ idx - 1, species.index( s ) ] ) # Update the radiative forcing for CH4
-                elif s == 'CO2':
+                if s == 'CO2':
                     # Carbon Cycle (skip it if we have concentrations, otherwise run it)
                     if self.flagEmissions == True:
                         cpool       = self._carbonCycle( cpool, Et[idx-1, species.index( s ) ], dt )
@@ -242,6 +241,15 @@ class climateScenario:
                     else:
                         Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ][ f'{units[species.index(s)]}{s}' ]
                     RFs[ idx, species.index( s ) ]  = self._radiativeForcingCO2( Catm[ idx - 1, species.index( s ) ] )
+                else:
+                    # Not CO2 - use gas cycle and general radiative forcing function
+                    C0      = SPECIES[ s ][ 'C_PI' ]
+                    tau_gas = SPECIES[ s ][ 'tau' ]
+                    f1      = SPECIES[ s ][ 'f1' ]
+                    f2      = SPECIES[ s ][ 'f2' ]
+                    f3      = SPECIES[ s ][ 'f3' ]
+                    Catm[ idx, species.index( s ) ] = C0 + self._gasCycle( Catm[ idx - 1, species.index( s ) ] - C0, tau = tau_gas, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
+                    RFs[ idx, species.index( s ) ]  = self._gasRadiativeForcing( f1, f2, f3, Catm[ idx - 1, species.index( s ) ], C0 ) # Update the radiative forcing
             # Climate Model
             totalRF = np.nansum( RFs[ idx - 1, : ] )
             gmst[ idx ], oceantemps[ idx, : ] = self._climateModel( totalRF, gmst[ idx - 1], oceantemps[ idx-1, : ], dt )
@@ -327,18 +335,44 @@ class climateScenario:
         rf             = coefC * np.log( C / C0 )
         return( rf )
     
-    
-
-    def _radiativeForcingCH4(self, M, M0=722, N0=270):
+    def _gasRadiativeForcing( self, f1, f2, f3, C, C0 = 0.0 ):
         """
-        Radiative forcing from methane (W/m^2)
-        M  : CH4 concentration (ppb)
-        M0 : reference CH4 (ppb), preindustrial ~722
-        N0 : reference N2O (ppb), preindustrial ~270
+        General radiative forcing function (FaIR-style, no overlap terms).
+
+        Parameters
+        ----------
+        C : float or array
+            Current concentration
+        C0 : float
+            Reference (preindustrial) concentration
+        f1 : float
+            Logarithmic coefficient (CO2-like)
+        f2 : float
+            Square-root coefficient (CH4/N2O-like)
+        f3 : float
+            Linear coefficient (F-gases)
+
+        Returns
+        -------
+        RF : float or array
+            Radiative forcing (W/m^2)
         """
 
-        return 0.036 * (np.sqrt(M) - np.sqrt(M0)) - (ch4_n20_overlap(M, N0) - ch4_n20_overlap(M0, N0))
-    
+        C  = np.asarray(C, dtype=float)
+        rf = np.zeros_like(C)
+
+        # Log term (CO2-like)
+        if f1 > 0:
+            rf_log  = f1 * np.log(C / C0)
+        else:
+            rf_log = 0
+        # Linear term (F-gases like)
+        rf_lin  = f2 * (C - C0)
+        # Square-root term (CH4/N2O-like)
+        rf_sqrt = f3 * (np.sqrt(C) - np.sqrt(C0))
+        # Combine terms
+        rf = rf_log + rf_sqrt + rf_lin
+        return rf
 
     def _climateModel( self, RF, tanm_ao, tanm_d, dt ):
         """_summary_
