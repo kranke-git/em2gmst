@@ -68,7 +68,7 @@ class climateScenario:
     def _load_pulseCO2( self ):
         """Load pulse CO2 emissions data."""
         # Pulse CO2 scenario: 1 GtC pulse in 1750
-        years = np.arange( 1750, 2001 )
+        years = np.arange( 1750, self.params['end_year'] + 1 )
         df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
         df.loc[ 1750, 'ppmCO2']  = self.params['pulse_size']  * SPECIES[ "CO2" ]["emission_conv"]  # Assume pulse_size is in kgCO2
         self.flagEmissions       = True
@@ -78,7 +78,7 @@ class climateScenario:
         """Load pulse non-CO2 emissions data."""
         # Pulse non-CO2 scenario: pulse_size in kilograms of that species in 1750
         species = self.name.replace( "pulse", "" ) # Extract the species name from the preset name (e.g., 'CH4' from 'pulseCH4')
-        years   = np.arange( 1750, 2001 )
+        years   = np.arange( 1750, self.params['end_year'] + 1 )
         df      = pd.DataFrame( index = years, data = 0.0, columns = [f'{SPECIES[ species ]["units"]}{species}'] )
         df.loc[ 1750, f'{SPECIES[ species ]["units"]}{species}']  = self.params['pulse_size']  * SPECIES[ species]["emission_conv"]  # Assume pulse_size is in kg of the species
         self.flagEmissions       = True
@@ -87,7 +87,7 @@ class climateScenario:
     def _load_abrupt4xCO2( self ):
         """Load abrupt 4xCO2 concentration data."""
         # Abrupt 4xCO2 scenario: 4x pre-industrial CO2 concentration in 1750
-        years = np.arange( 1750, 2001 )
+        years = np.arange( 1750, self.params['end_year'] + 1 )
         df    = pd.DataFrame( index = years, data = 0.0, columns = ['Catm_CO2'] )
         df[ 'Catm_CO2' ]       = 277.15 * 4.0
         self.flagEmissions = False
@@ -131,7 +131,7 @@ class climateScenario:
         merged.set_index( 'year', inplace = True )
         merged   = merged.rename( columns = { 'data_mean_global': 'Catm' } ) 
         syear    = 1750
-        eyear    = 2100
+        eyear    = self.params['end_year']
         # Set emission flag to be false for SSP scenarios
         self.flagEmissions = False
         dfout = merged.loc[ syear:eyear ][['Catm']]
