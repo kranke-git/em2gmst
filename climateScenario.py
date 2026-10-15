@@ -5,12 +5,15 @@ import pandas            as pd
 import numpy             as np
 import matplotlib.pyplot as plt
 import matplotlib        as mpl
+import xarray            as xr
 from   constants         import CO2_PI, DEFAULT_PARAMS, SPECIES
+from   pathlib           import Path
+from   urllib.request    import urlretrieve
 
 
 class climateScenario:
         
-    def __init__( self, emissions, name = None, **kwargs ):
+    def __init__( self, emissions, name = None, datadir = './data', **kwargs ):
         """
         This Python function initializes an object with emissions data and an optional name attribute.
         
@@ -23,10 +26,17 @@ class climateScenario:
         self.params = DEFAULT_PARAMS.copy()
         self.params.update( kwargs )
         
+        self.datadir        = Path( datadir )
+        self.remote_datadir = 'https://svante.mit.edu/~pgiani/emissionsdata'
+        
         if isinstance( emissions, str ):
             self.name        = name or emissions
             self.preset_name = emissions
-            self.datadir = 'https://svante.mit.edu/~pgiani/emissionsdata'
+            # Handle end_year for historical (set to 2025 by default in case not passed and user selected historical)
+            if emissions == 'historical':
+                if 'end_year' not in kwargs:
+                    self.params['end_year'] = 2025
+
             self.emissions   = self._load_preset( emissions )
         elif isinstance( emissions, pd.Series ):
             self.name        = name or "Custom"
@@ -41,13 +51,35 @@ class climateScenario:
             self.flagEmissions = True
         else:
             raise ValueError("emissions must be a string or a pandas Series.")
+        
+        
+    def _get_datafile(self, filename):
 
+        local_path = self.datadir / filename
+
+        if local_path.is_file():
+            return local_path
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        remote_url = f"{self.remote_datadir}/{filename}"
+        tmp_path = local_path.with_suffix(local_path.suffix + '.tmp')
+
+        try:
+            urlretrieve(remote_url, tmp_path)
+            tmp_path.replace(local_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        return local_path
         
     def _load_preset( self, name ):
         """Load emissions data from a CSV file for known presets."""
         name = name.lower()
 
-        if name == "historical":
+        if name == "historical_co2":
+            return self._load_historical_co2()
+        elif name == 'historical':
             return self._load_historical()
         elif name == "historical_ch4":
             return self._load_historical_ch4()
@@ -69,7 +101,7 @@ class climateScenario:
         """Load pulse CO2 emissions data."""
         # Pulse CO2 scenario: 1 GtC pulse in 1750
         years = np.arange( 1750, self.params['end_year'] + 1 )
-        df = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
+        df    = pd.DataFrame( index = years, data = 0.0, columns = ['ppmCO2'] )
         df.loc[ 1750, 'ppmCO2']  = self.params['pulse_size']  * SPECIES[ "CO2" ]["emission_conv"]  # Assume pulse_size is in kgCO2
         self.flagEmissions       = True
         return df
@@ -94,9 +126,9 @@ class climateScenario:
         return df
 
     
-    def _load_historical( self ):
+    def _load_historical_co2( self ):
         """Load historical emissions data from a CSV file."""
-        filename     = self.datadir + '/historicalEmissions.csv'
+        filename     = self._get_datafile('historicalEmissions.csv')
         df           = pd.read_csv( filename, index_col = 0 ) # This values are in GtCO2
         df['ppmCO2'] = ( df['FF'] + df['LU'] ) / 2.12         #  ppm/year; for the carbon cycle model
         self.flagEmissions = True
@@ -104,24 +136,74 @@ class climateScenario:
     
     def _load_historical_ch4( self ):
         """Load historical CH4 emissions data from a CSV file."""
-        fair_emissions_file = '/home/kranke/Documents/ResearchProjects/BC3/Data/emissionsdata/CEDS_CH4_global_emissions_by_CEDS_sector_v_2019_12_23.csv'
+        fair_emissions_file = self._get_datafile('CEDS_CH4_global_emissions_by_CEDS_sector_v_2019_12_23.csv')
         df                  = pd.read_csv( fair_emissions_file, header = None, names = ['Year', 'Emissions'] )  
         df['ppbCH4']        = df['Emissions'] / 2.8
         self.flagEmissions = True
         df.set_index( 'Year', inplace=True )
-
         return df
+    
+    def _load_historical(self):
+        """
+        Load historical emissions for multiple greenhouse gases.
+        Input CSV units:
+            CO2_total : Mt CO2/yr
+            CH4       : Mt CH4/yr
+            N2O       : kt N2O/yr
+            SF6       : kt SF6/yr
+            HFC134a   : kt HFC134a/yr
+
+        Output:
+            DataFrame with columns ppmCO2, ppbCH4, ppbN2O,
+            pptSF6, pptHFC134a.
+        """
+
+        filename = self._get_datafile('global_emissions_1750_2025_by_species.csv')
+        df       = pd.read_csv(filename, index_col=0)
+
+        # Species and input mass units (kg per unit of CSV emissions)
+        species = {
+            'CO2':      ('CO2_total', 1e9),
+            'CH4':      ('CH4',       1e9),
+            'N2O':      ('N2O',       1e6),
+            'SF6':      ('SF6',       1e6),
+            'HFC-134a': ('HFC134a',   1e6),
+        }
+
+        dfout = pd.DataFrame(index=df.index)
+
+        for s, (column, factor) in species.items():
+
+            # Conversion from kg emissions to atmospheric concentration change
+            conv = SPECIES[s]['emission_conv']
+            units = SPECIES[s]['units']
+            dfout[f'{units}{s}'] = df[column] * factor * conv
+            # subtract preindustrial baseline that maintains PI concentrations
+            dfout[f'{units}{s}'] -= dfout[f'{units}{s}'].iloc[0]
+
+        external_filename = self._get_datafile('external_forcing_ssp245_1750_2100.csv')
+        external          = pd.read_csv( external_filename, index_col=0 )       
+        # Select only forcing columns meant to drive the climate model
+        external = external[[   'RF_aerosol', 'RF_ozone', 'RF_stratospheric_H2O', 'RF_contrails', 'RF_bc_snow',
+                                'RF_land_use', 'RF_volcanic', 'RF_solar' ]]
+        dfout             = dfout.join( external , how='left')
+        self.flagEmissions = True
+        
+        # Cut dataframe up to desired end_year
+        dfout = dfout.loc[:self.params['end_year']]
+        
+        return dfout
     
     def _load_sspScenario( self ):
         """Load SSP Concentrations data from a CSV file."""
-        histfile = self.datadir + '/CO2molefractions_hist_ssp/mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_CMIP_UoM-CMIP-1-2-0_gr1-GMNHSH_0000-2014.csv'
+        histfile = self._get_datafile('CO2molefractions_hist_ssp/mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_CMIP_UoM-CMIP-1-2-0_gr1-GMNHSH_0000-2014.csv')
         sspfiles = {'ssp119': 'mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_ScenarioMIP_UoM-IMAGE-ssp119-1-2-1_gr1-GMNHSH_2015-2500.csv',
                     'ssp126': 'mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_ScenarioMIP_UoM-IMAGE-ssp126-1-2-1_gr1-GMNHSH_2015-2500.csv',
                     'ssp245': 'mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_ScenarioMIP_UoM-MESSAGE-GLOBIOM-ssp245-1-2-1_gr1-GMNHSH_2015-2500.csv',
                     'ssp370': 'mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_ScenarioMIP_UoM-AIM-ssp370-1-2-1_gr1-GMNHSH_2015-2500.csv',
                     'ssp585': 'mole-fraction-of-carbon-dioxide-in-air_input4MIPs_GHGConcentrations_ScenarioMIP_UoM-REMIND-MAGPIE-ssp585-1-2-1_gr1-GMNHSH_2015-2500.csv' }
         if self.name in sspfiles.keys():
-            sspfile  = f"{self.datadir}/CO2molefractions_hist_ssp/{sspfiles[ self.name ] }"
+            sspfile  = self._get_datafile(f"CO2molefractions_hist_ssp/{sspfiles[ self.name ] }")
         else:
             raise ValueError(f"Unknown SSP scenario '{self.name}'. Valid options are: {', '.join(sspfiles.keys())}")    
         # Process historical and SSP concentration data
@@ -140,7 +222,7 @@ class climateScenario:
     
     def _load_cmip7scenario( self ):
         """Load CMIP7 Emissions data from the big CSV file."""
-        filename = self.datadir + '/cmip7_extensions_1750-2500.csv'
+        filename = self._get_datafile('cmip7_extensions_1750-2500.csv')
         # Read in the data and subset for the correct scenario and CO2 only
         df             = pd.read_csv( filename, index_col = 0 )
         dfCO2          = df[ ( ( df['variable'] == 'CO2 AFOLU' ) | ( df['variable'] == 'CO2 FFI' ) ) ]
@@ -163,119 +245,172 @@ class climateScenario:
 
         
     def integrate( self, dt = 0.1 ):
+        """Integrate gases and any externally prescribed RF_* forcing components.
+
+        Input gas columns: ppmCO2, ppbCH4, etc. (emissions if
+        self.flagEmissions, concentrations otherwise).
+        Input external forcing columns: RF_aerosol, RF_volcanic, ... [W/m2].
+
+        The linear climate model is run separately for each forcing component;
+        summing these responses gives the total temperature and ocean state.
         """
-        This function integrates emissions data over time to simulate the carbon cycle and update atmospheric CO2 concentration and GMST.
-        :param self: The `self` parameter refers to the instance of the class in which this method is defined
-        :param dt: The `dt` parameter in the `integrate` method represents the time step for the integration process, which is set to 0.1 by default
-        """
-        # Unpack variables from self
         emissions = self.emissions
         species_units = {
             c[3:]: c[:3]
             for c in emissions.columns
             if c.startswith(('ppm', 'ppb', 'ppt'))
-        }        
-        species = list( species_units.keys() )
-        units   = list( species_units.values() )
-        NS      = len( species )
-        # Assign time stuff and initialize variables to nan
-        startTime          = emissions.index.min()
-        endTime            = emissions.index.max()
-        tvec               = np.arange( startTime, endTime + dt, dt )
-        tvecE              = emissions.index.values
-        NT                 = int( ( endTime - startTime ) / dt ) + 1
-        Catm               = np.full( ( NT, NS ), np.nan )
-        Et                 = np.full( ( NT, NS ), np.nan )
-        RFs                = Catm.copy()
-        gmst               = np.full( NT, np.nan )
-        oceantemps         = np.full( ( NT, 4 ), np.nan )
-        # Initial conditions for temperatures
-        gmst[ 0 ]          = 0.0    # Initial GMST anomaly [K]
-        oceantemps[ 0, : ] = 0.0    # Initial ocean temperature anomalies [K]
-        
-        # Initial condition for gas species
-        for s in species:
-            if s == 'CO2':
-                Catm[ 0, species.index( s ) ] = CO2_PI # Pre-industrial CO2 concentration [ppm]
-                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
-                cpool                         = np.zeros( ( 1, 4 ) ) # Initial carbon pool for the carbon cycle model
-            else:
-                Catm[ 0, species.index( s ) ] = SPECIES[ s ][ 'C_PI' ] # Pre-industrial CH4 concentration [ppm]
-                RFs[ 0, species.index( s ) ]  = 0.0    # Initial Radiative Forcing [W/m^2]
-            
-        # Figure out emission vector to be used in the carbon cycle model (if needed)
-        if self.flagEmissions == True:
-            Et = np.zeros( ( NT, NS ) )
-            for s in species:
-                for i in range( NT ):
-                    idx = np.searchsorted( tvecE, tvec[ i ], side = 'right' ) - 1
-                    Et[ i, species.index( s ) ] = emissions.iloc[ idx ][ f'{units[species.index(s)]}{s}' ] if idx >= 0 else 0
-        
-        # Handle the pulse cases with a special initial condition
-        if self.name ==  'pulseCO2':
-            Et = np.zeros( ( NT, 1 ) )
-            cpool = self._carbonCycle( cpool, emissions[f'{units[species.index("CO2")]}CO2'].iloc[0], 1 ) # Run the carbon cycle for the first time step to get the initial carbon pool state
-            Catm[ 0, species.index( 'CO2' ) ] = CO2_PI + np.sum( cpool )
-            RFs[  0, species.index( 'CO2' ) ] = self._radiativeForcingCO2( Catm[ 0, species.index( 'CO2' ) ] )    # Initial Radiative Forcing [W/m^2]
-        elif self.name.startswith( 'pulse' ):
-            Et      = np.zeros( ( NT, 1 ) )
-            Catm[ 0, species.index( species[ 0 ] ) ] = SPECIES[ species[ 0 ] ][ 'C_PI' ] + emissions.iloc[ 0 ][ f'{SPECIES[ species[ 0 ]]["units"]}{species[ 0 ]}' ] # Set the initial concentration based on the pulse size
-            C0      = SPECIES[ species[ 0 ] ][ 'C_PI' ]
-            f1      = SPECIES[ species[ 0 ] ][ 'f1' ]
-            f2      = SPECIES[ species[ 0 ] ][ 'f2' ]
-            f3      = SPECIES[ species[ 0 ] ][ 'f3' ]
-            RFs[  0, species.index( species[ 0 ] ) ] = self._gasRadiativeForcing( f1, f2, f3, Catm[ 0, species.index( species[ 0 ] ) ], C0 ) # Update the radiative forcing for CH4 based on the initial concentration
+        }
+        species = list(species_units.keys())
+        units = list(species_units.values())
+        NS = len(species)
 
-        # Main loop over time #
-        idx = 0
-        for currtime in tvec[:-1]:
-            # Update the current time index
-            idx += 1
-            # Loop over species to update concentrations, RFs
-            for s in species:
+        # Other forcings can be supplied simply by adding RF_* columns.
+        external_cols = [c for c in emissions.columns if c.startswith('RF_')]
+        external_names = [c[3:] for c in external_cols]
+        overlap = set(species) & set(external_names)
+        if overlap:
+            raise ValueError(f'External RF names collide with gas species: {sorted(overlap)}')
+        component_names = species + external_names
+        NC = len(component_names)
+        if NC == 0:
+            raise ValueError('No gas or externally prescribed forcing columns found.')
+
+        startTime = emissions.index.min()
+        endTime = emissions.index.max()
+        tvec = np.arange(startTime, endTime + dt / 2, dt)
+        NT = len(tvec)
+        tvecE = emissions.index.values
+
+        Catm = np.full((NT, NS), np.nan)
+        Et = np.full((NT, NS), np.nan)
+        RFs = np.full((NT, NS), np.nan)
+
+        # Build common time-by-component forcing array.
+        forcing_components = np.zeros((NT, NC))
+        for k, col in enumerate(external_cols):
+            values = emissions[col].to_numpy(dtype=float)
+            if not np.isfinite(values).all():
+                raise ValueError(f'External forcing column {col!r} contains NaNs or infs.')
+            forcing_components[:, NS + k] = np.interp(tvec, tvecE, values)
+
+        # Separate temperature and four-layer ocean response for each agent.
+        gmst_components = np.zeros((NT, NC))
+        oceantemps_components = np.zeros((NT, NC, 4))
+        gmst = np.zeros(NT)
+        oceantemps = np.zeros((NT, 4))
+
+        # Initial concentrations and forcing for emitted gases.
+        for j, s in enumerate(species):
+            if s == 'CO2':
+                Catm[0, j] = CO2_PI
+                RFs[0, j] = 0.0
+                cpool = np.zeros((1, 4))
+            else:
+                Catm[0, j] = SPECIES[s]['C_PI']
+                RFs[0, j] = 0.0
+
+        if self.flagEmissions:
+            Et = np.zeros((NT, NS))
+            # Emission rates are held piecewise constant between years.
+            interval_indices = np.searchsorted(tvecE, tvec, side='right') - 1
+            for j, s in enumerate(species):
+                col = f'{units[j]}{s}'
+                values = emissions[col].to_numpy(dtype=float)
+                if not np.isfinite(values).all():
+                    raise ValueError(f'Gas emissions column {col!r} contains NaNs or infs.')
+                Et[:, j] = np.where(interval_indices >= 0,
+                                    values[np.maximum(interval_indices, 0)], 0.0)
+
+        # Preserve the existing special handling of emission pulses.
+        if self.name == 'pulseCO2':
+            Et = np.zeros((NT, 1))
+            j = species.index('CO2')
+            cpool = self._carbonCycle(cpool, emissions[f'{units[j]}CO2'].iloc[0], 1)
+            Catm[0, j] = CO2_PI + np.sum(cpool)
+            RFs[0, j] = self._radiativeForcingCO2(Catm[0, j])
+        elif self.name.startswith('pulse'):
+            Et = np.zeros((NT, 1))
+            s = species[0]
+            Catm[0, 0] = SPECIES[s]['C_PI'] + emissions.iloc[0][f'{SPECIES[s]["units"]}{s}']
+            C0 = SPECIES[s]['C_PI']
+            RFs[0, 0] = self._gasRadiativeForcing(
+                SPECIES[s]['f1'], SPECIES[s]['f2'], SPECIES[s]['f3'], Catm[0, 0], C0
+            )
+
+        # Initial gas forcing (external forcing is already populated).
+        forcing_components[0, :NS] = RFs[0, :]
+
+        for idx in range(1, NT):
+            currtime = tvec[idx - 1]
+            for j, s in enumerate(species):
                 if s == 'CO2':
-                    # Carbon Cycle (skip it if we have concentrations, otherwise run it)
-                    if self.flagEmissions == True:
-                        cpool       = self._carbonCycle( cpool, Et[idx-1, species.index( s ) ], dt )
-                        Catm[ idx, species.index( s ) ] = CO2_PI + np.sum( cpool )
+                    if self.flagEmissions:
+                        cpool = self._carbonCycle(cpool, Et[idx - 1, j], dt)
+                        Catm[idx, j] = CO2_PI + np.sum(cpool)
                     else:
-                        Catm[ idx, species.index( s ) ] = emissions.iloc[ int( np.searchsorted( emissions.index.values, currtime, side = 'right' ) - 1 ) ][ f'{units[species.index(s)]}{s}' ]
-                    RFs[ idx, species.index( s ) ]  = self._radiativeForcingCO2( Catm[ idx - 1, species.index( s ) ] )
+                        source_idx = np.searchsorted(tvecE, currtime, side='right') - 1
+                        Catm[idx, j] = emissions.iloc[source_idx][f'{units[j]}{s}']
+                    # Retain existing one-step lag in the forcing calculation.
+                    RFs[idx, j] = self._radiativeForcingCO2(Catm[idx - 1, j])
                 else:
-                    # Not CO2 - use gas cycle and general radiative forcing function
-                    C0      = SPECIES[ s ][ 'C_PI' ]
-                    tau_gas = SPECIES[ s ][ 'tau' ]
-                    f1      = SPECIES[ s ][ 'f1' ]
-                    f2      = SPECIES[ s ][ 'f2' ]
-                    f3      = SPECIES[ s ][ 'f3' ]
-                    Catm[ idx, species.index( s ) ] = C0 + self._gasCycle( Catm[ idx - 1, species.index( s ) ] - C0, tau = tau_gas, Et = Et[ idx-1, species.index( s ) ], dt = dt ) # Update the CH4 cycle and get new concentration
-                    RFs[ idx, species.index( s ) ]  = self._gasRadiativeForcing( f1, f2, f3, Catm[ idx - 1, species.index( s ) ], C0 ) # Update the radiative forcing
-            # Climate Model
-            totalRF = np.nansum( RFs[ idx - 1, : ] )
-            gmst[ idx ], oceantemps[ idx, : ] = self._climateModel( totalRF, gmst[ idx - 1], oceantemps[ idx-1, : ], dt )
-            
-        # Output stuff (Interpolated)#
-        indices     = np.searchsorted( tvec, emissions.index, side='right') - 1
-        gmst_interp = gmst[ indices ]
-        self.outdf  = pd.DataFrame({'GMST': gmst_interp, }, index = emissions.index )
-        for s in species:
-            self.outdf[ f'Catm_{s}' ] = Catm[ indices, species.index( s ) ]
-            self.outdf[ f'RF_{s}' ]   = RFs[ indices, species.index( s ) ]
-            if self.flagEmissions == True:
-                convfac = 1 / SPECIES[ s ]['emission_conv']
-                self.outdf[ f'emissions_{s}' ] = emissions[ f'{units[species.index(s)]}{s}' ] * convfac  # Convert ppm to GtC for emissions
-                self.outdf[f'cumulativeEmissions_{s}'] = self.outdf[ f'emissions_{s}' ].cumsum()  # Cumulative emissions in GtC
-        
-        # Output stuff (on the true grid)
-        self.outdf_tgrid = pd.DataFrame( index = tvec, data = { 'GMST': gmst } )
-        for s in species:
-            self.outdf_tgrid[ f'Catm_{s}' ] = Catm[ :, species.index( s ) ]
-            self.outdf_tgrid[ f'RF_{s}' ]   = RFs[ :, species.index( s ) ]
-            if self.flagEmissions == True:
-                self.outdf_tgrid[ f'emissions_{s}' ] = Et[ :, species.index( s ) ]
-                self.outdf_tgrid[f'cumulativeEmissions_{s}'] = np.cumsum( self.outdf_tgrid[ f'emissions_{s}' ] ) * dt  # Cumulative emissions in GtC
-        
-    
+                    C0 = SPECIES[s]['C_PI']
+                    if self.flagEmissions:
+                        Catm[idx, j] = C0 + self._gasCycle(
+                            Catm[idx - 1, j] - C0,
+                            tau=SPECIES[s]['tau'], Et=Et[idx - 1, j], dt=dt
+                        )
+                    else:
+                        source_idx = np.searchsorted(tvecE, currtime, side='right') - 1
+                        Catm[idx, j] = emissions.iloc[source_idx][f'{units[j]}{s}']
+                    RFs[idx, j] = self._gasRadiativeForcing(
+                        SPECIES[s]['f1'], SPECIES[s]['f2'], SPECIES[s]['f3'],
+                        Catm[idx - 1, j], C0
+                    )
+
+            forcing_components[idx, :NS] = RFs[idx, :]
+
+            # Integrate each forcing response separately, then sum.
+            for j in range(NC):
+                gmst_components[idx, j], oceantemps_components[idx, j, :] = (
+                    self._climateModel(
+                        forcing_components[idx - 1, j],
+                        gmst_components[idx - 1, j],
+                        oceantemps_components[idx - 1, j, :],
+                        dt
+                    )
+                )
+            gmst[idx] = gmst_components[idx, :].sum()
+            oceantemps[idx, :] = oceantemps_components[idx, :, :].sum(axis=0)
+
+        # Annual-index output and the native integration grid.
+        indices = np.searchsorted(tvec, tvecE, side='right') - 1
+        indices = np.clip(indices, 0, NT - 1)
+        self.outdf = pd.DataFrame({'GMST': gmst[indices]}, index=emissions.index)
+        self.outdf_tgrid = pd.DataFrame({'GMST': gmst}, index=tvec)
+
+        for j, s in enumerate(species):
+            self.outdf[f'Catm_{s}'] = Catm[indices, j]
+            self.outdf[f'RF_{s}'] = RFs[indices, j]
+            self.outdf_tgrid[f'Catm_{s}'] = Catm[:, j]
+            self.outdf_tgrid[f'RF_{s}'] = RFs[:, j]
+            if self.flagEmissions:
+                convfac = 1 / SPECIES[s]['emission_conv']
+                self.outdf[f'emissions_{s}'] = emissions[f'{units[j]}{s}'] * convfac
+                self.outdf[f'cumulativeEmissions_{s}'] = self.outdf[f'emissions_{s}'].cumsum()
+                self.outdf_tgrid[f'emissions_{s}'] = Et[:, j]
+                self.outdf_tgrid[f'cumulativeEmissions_{s}'] = np.cumsum(Et[:, j]) * dt
+
+        for j, component in enumerate(component_names):
+            # Gas RF_* output was already saved above; external RF_* output is new.
+            if j >= NS:
+                self.outdf[f'RF_{component}'] = forcing_components[indices, j]
+                self.outdf_tgrid[f'RF_{component}'] = forcing_components[:, j]
+            self.outdf[f'GMST_{component}'] = gmst_components[indices, j]
+            self.outdf_tgrid[f'GMST_{component}'] = gmst_components[:, j]
+
+        self.outdf['RF_total'] = forcing_components[indices, :].sum(axis=1)
+        self.outdf_tgrid['RF_total'] = forcing_components.sum(axis=1)
+
     def _gasCycle( self, gas, tau, Et, dt ):
         """
         This function simulates the gas cycle by updating the atmospheric concentration based on emissions data and a specified time scale.
@@ -425,6 +560,70 @@ class climateScenario:
 
         # Post-processing
         return aoQnew / ao_hc, dQnew / d_hc
+    
+    def patternScalingSpatial( self, year, variable, exp='ssp126-ssp245-ssp370-ssp585', member='MAVG', model='MPI-ESM1-2-LR', grid='r180x90', monthlab='AnnualAverages' ):
+        """Estimate spatial climate anomalies using linear pattern scaling."""
+
+        filename = self._get_datafile(
+            f'patternScaling/{model}/'
+            f'PatternScalingCoefficients_{variable}_{exp}_{member}_{grid}_{monthlab}.nc'
+        )
+
+        with xr.open_dataset(filename) as ds:
+            pscoef = ds['slope'].load()
+
+        global_tas = self.outdf['GMST'].loc[year]
+        return pscoef * global_tas        
+        
+    def patternScalingTemporal( self, location, variable, exp='ssp126-ssp245-ssp370-ssp585', member='MAVG', model='MPI-ESM1-2-LR', grid='r180x90', monthlab='AnnualAverages' ):
+        """
+        Calculate a time series of local climate anomalies using pattern scaling.
+
+        Parameters
+        ----------
+        location : tuple
+            (latitude, longitude) in degrees.
+        variable : str
+            Climate variable (e.g., 'tas', 'pr').
+
+        Returns
+        -------
+        pd.Series
+            Local climate anomaly indexed by year.
+        """
+
+        lat, lon = location
+
+        # Load pattern-scaling coefficients
+        coeff_file = self._get_datafile(
+            f'patternScaling/{model}/'
+            f'PatternScalingCoefficients_{variable}_{exp}_{member}_{grid}_{monthlab}.nc'
+        )
+
+        with xr.open_dataset(coeff_file) as ds:
+
+            pscoef = ds['slope']
+
+            # Adjust longitude to match the dataset convention
+            if ds['lon'].min().item() >= 0:
+                lon = lon % 360
+            else:
+                lon = (lon + 180) % 360 - 180
+
+            # Select nearest grid cell
+            slope = pscoef.sel(
+                lat=lat,
+                lon=lon,
+                method='nearest'
+            ).item()
+
+        # Apply pattern scaling to entire GMST time series
+        local_ts = self.outdf['GMST'] * slope
+
+        local_ts.name = f'{variable}_local'
+
+        return local_ts        
+
     
     def plotOutput( self, species = 'CO2', title = None, family = 'monospace', Catm_anomaly_flag = False, **kwargs ):
         """
